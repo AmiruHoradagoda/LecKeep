@@ -11,7 +11,7 @@ LecKeep/
   leckeep_backend/      Spring Boot API for auth, users, subjects, folders, documents, groups, and sharing
   leckeep_frontend/     React + Vite client application
   Ansible/              EC2 Docker deployment playbook
-  terraform/            AWS security group and EC2 lookup configuration
+  Terraform/            AWS security group and EC2 lookup configuration
   docker-compose.yml    Local container orchestration scaffold
   Jenkinsfile           CI/CD pipeline scaffold
   architecture-design.md
@@ -365,7 +365,7 @@ The Jenkinsfile runs Checkout, Backend Tests, Backend Build, Frontend Install, F
 - Provide a Linux agent with both `linux` and `docker` labels, a JDK 17 or newer, a POSIX shell, and access to a working Docker daemon. Maven is supplied by the wrapper; no Jenkins Maven installation is required.
 - Install the Pipeline, Git, Credentials Binding, JUnit, and NodeJS plugins. Configure the existing NodeJS tool name `node-22.12.0` with Node.js 22.12.0 or newer compatible version.
 - Provide the username/password credential `dockerhub-credentials`. Use the Docker Hub username and an access token with push permission for `amiru1234/leckeep-backend` and `amiru1234/leckeep-frontend`. Change the image namespace in `Jenkinsfile` if needed.
-- Set the public `VITE_API_URL` build parameter for the intended environment. It defaults to `/api/v1` and is applied to both the standalone frontend build and Docker build. This value is embedded in browser assets; it must not contain credentials. A relative URL requires routing `/api` to the backend when deployment is configured later.
+- Set the public `VITE_API_URL` build parameter for the intended environment. It defaults to `/api/v1` and is applied to both the standalone frontend build and Docker build. This value is embedded in browser assets; it must not contain credentials. Production routes `/api` through the Nginx proxy described below.
 - Backend tests mock MongoDB and object storage and require no production database, JWT, MinIO, or SSH credentials. Tests run once with `sh ./mvnw -B clean test`; packaging uses `sh ./mvnw -B package -DskipTests` after that stage succeeds. Jenkins publishes the JUnit reports.
 - Frontend dependencies come from `npm ci` and `package-lock.json`. Docker builds use the current app directories and publish `amiru1234/leckeep-backend:latest` and `amiru1234/leckeep-frontend:latest`.
 - Docker Hub credentials are bound only during push, tracing is disabled for login, and authentication uses password stdin. Logout and removal of the temporary Docker config run even when a push fails. A test, build, or push failure fails the pipeline.
@@ -385,11 +385,11 @@ cp Ansible/inventory.example.ini Ansible/inventory.ini
 
 Edit the ignored inventory with the current EC2 DNS/IP, SSH user, and local private-key path (or use `ssh-agent`). Verify the server's SSH fingerprint and add it to your known hosts. Host-key checking stays enabled. Never commit an SSH key or real inventory.
 
-The target needs Python 3, SSH access, passwordless sudo (or use `--ask-become-pass`), internet access to Docker's package repository and image registry, and enough disk for images and persistent data. Automatic host preparation installs Docker Engine and its Compose plugin from the [official Docker Ubuntu repository](https://docs.docker.com/engine/install/ubuntu/) on Ubuntu 22.04+ (amd64/arm64), then enables Docker. It does not install Jenkins or remove existing Docker packages. If the host already has a working Docker/Compose installation, use `-e leckeep_prepare_host=false`; Python `requests` is also needed for optional registry login. Compose must be version 2.18+.
+The target needs Python 3, SSH access, passwordless sudo (or use `--ask-become-pass`), internet access to Docker's package repository and image registry, and enough disk for images and persistent data. Automatic host preparation installs Docker Engine and its Compose plugin from the [official Docker Ubuntu repository](https://docs.docker.com/engine/install/ubuntu/) on Ubuntu 22.04+ (amd64/arm64), then enables Docker. It does not install Jenkins or remove existing Docker packages. If the host already has a working Docker/Compose installation, use `-e leckeep_prepare_host=false`; Python `requests` is also needed for optional registry login. Compose must be version 2.24.4+ for the production port resets.
 
 `Ansible/vars/main.yml` contains non-secret defaults: `/opt/leckeep`, project name `leckeep`, image references, host ports, database/bucket names, and CORS origins. Override these with `-e @path/to/deployment-vars.yml`. Keep the project name stable across releases so the same named volumes are reused. Image maps must specify all four services; prefer release tags or digests for controlled releases.
 
-Before deployment, publish backend/frontend images using the existing Jenkins pipeline or your existing image build/push process. Jenkins remains CI-only. **Build the frontend with `VITE_API_URL=http://localhost:5050/api/v1` for the default SSH-tunnel setup below.** The Jenkins default `/api/v1` needs a reverse proxy, which this step does not provide. Changing Ansible variables cannot change an API URL already baked into a frontend image.
+Before deployment, publish backend/frontend images using the existing Jenkins pipeline or your existing image build/push process. Jenkins remains CI-only. **Build the frontend with `VITE_API_URL=/api/v1` (the Jenkins default) for production Nginx routing.** Rebuild/publish the frontend image to include the SPA fallback configuration. Changing Ansible variables cannot change an API URL already baked into a frontend image.
 
 MinIO is built from source locally and is not currently published by Jenkins. Publish that image to a registry accessible by EC2, for example (replace `YOUR_NAMESPACE` and the release tag):
 
@@ -411,28 +411,146 @@ Supply these secrets through the Ansible controller's environment or an untracke
 
 Development defaults are rejected. Runtime secrets must be single-line and must not contain `${`, which the current Spring configuration interprets as a nested property placeholder. Ordinary dollar signs, quotes, spaces, and backslashes are preserved. Do not pass secret values directly on the command line, print them, or copy the development `.env` to EC2. Runtime `.env` is generated under the deployment directory with permissions `0600`; secret tasks suppress logs and diffs. Registry authentication is stored in the deployment user's Docker configuration (root with default `become: true`). Secrets files named `Ansible/secrets*.yml`/`.yaml` are ignored; protect any local secret file with `chmod 600` or encrypt it with Ansible Vault. Changing MinIO credentials on an existing stack requires keeping server and backend values synchronized; changing the JWT key invalidates existing tokens.
 
-Deploy, then run the same command again to check repeatability:
+Obtain the TLS certificate as described below, then set `APP_DOMAIN` on the Ansible controller (or supply `leckeep_domain` in extra-vars). Deploy and run the same command again to check repeatability:
 
 ```bash
 ansible-playbook -i Ansible/inventory.ini Ansible/playbook.yml --syntax-check
 ansible-playbook -i Ansible/inventory.ini Ansible/playbook.yml
 ```
 
-The playbook renders `/opt/leckeep/docker-compose.yml` from the repository's Compose definition, substituting registry images and removing local build instructions. Ports, dependencies, healthchecks, environment wiring, and persistent volumes remain defined by Compose. It validates the configuration without printing secrets, pulls images, runs Compose with automatic recreation and health waiting, removes only orphans within the selected project, and fails if any of the four required services is missing or unhealthy. It never stops/removes individual application containers first and never deletes volumes. Same-image redeployments retain running containers; updated images/configuration can recreate affected containers. No automatic rollback is provided.
+The playbook deploys the base Compose definition plus `docker-compose.prod.yml` and the normal project Nginx template. It validates the domain, matching HTTPS origin, existing certificate files, and root-owned private-key permissions before changing the host. Five services must become healthy. Proxy configuration changes regenerate and syntax-check the Nginx configuration before reloading it. Images/configuration are reconciled without deleting named volumes. No automatic rollback or certificate issuance is performed by Ansible. `leckeep_production=false` retains the original four-service deployment for development/testing.
 
-On the server, inspect status and logs:
+### Production reverse proxy and HTTPS
+
+Public access is `https://<APP_DOMAIN>/` and `https://<APP_DOMAIN>/api/v1/...`. Nginx is the only service publishing ports: **80 and 443**. It sends frontend requests to `frontend:80`, preserves `/api/v1/...` when forwarding to `backend:8080`, and supplies standard forwarding headers. The frontend's Nginx serves `index.html` for SPA paths, so refreshing a frontend URL works.
+
+Frontend, backend, MongoDB, MinIO API, and MinIO console have no production host ports. The override explicitly resets development port mappings; passing both Compose files is required. Local development still uses `docker compose up -d` and the original localhost ports. The production frontend uses `/api/v1`; CORS permits only the configured HTTPS origin, and Spring honors the proxy headers.
+
+Document previews retain the existing permission check and 15-minute signed URL. `MINIO_PUBLIC_URL` becomes the application HTTPS origin. Nginx permits only signed GET/HEAD requests under the configured bucket path, forwards the original URI/query and Host for signature verification, and denies storage writes through this route. MinIO still validates each signature. This limited read route is required for browser previews; it does not publish a MinIO port or its administration console. Treat signed URLs as temporary bearer credentials. Query strings are omitted from proxy access logs, and preview-route logging is disabled.
+
+Nginx adds `nosniff`, `SAMEORIGIN`, and `no-referrer` headers. It permits 26 MiB request bodies to allow multipart overhead around the application's 25 MiB file limit. Spring multipart limits are 25 MiB per file and 26 MiB per request. HSTS is deliberately absent until the public TLS endpoint and renewal are confirmed.
+
+For a build-on-host deployment instead of Ansible:
 
 ```bash
-sudo docker compose --project-directory /opt/leckeep ps
-sudo docker compose --project-directory /opt/leckeep logs --tail=100 frontend backend mongodb minio
+cp .env.prod.example .env.prod
+chmod 600 .env.prod
+# Set APP_DOMAIN and private JWT/MinIO credentials in .env.prod.
+# Certificates must already exist as described below.
+docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml build
+docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml up -d --wait
 ```
 
-The stack retains loopback-only ports. MongoDB has no published port, and MinIO API/console are not publicly exposed. From your workstation, forward the application and preview ports (replace the SSH destination; adjust both local/server ports if you changed defaults):
+Do not use the development credentials. `PUBLIC_ORIGIN` defaults to `https://APP_DOMAIN`; an explicit value must match the domain and optional HTTPS port. `TLS_CERT_DIR` defaults to `/etc/letsencrypt`, mounted read-only including `live/` and `archive/` so certificate symlinks resolve. TLS keys are never copied into images or Git. Nginx configuration is mounted read-only. Keep the same Compose project name across releases to retain `<project>_mongodb_data` and `<project>_minio_data`; never deploy with `down -v`.
+
+### DNS, initial certificate, and renewal
+
+No live certificate has been issued or verified from this workstation. Configure a domain you control; the old application domains in historical configuration are not assumed to be active.
+
+1. Point the domain's DNS A record to the EC2 public/elastic IP. Add an AAAA record only if IPv6 routing works. Allow inbound TCP **80/443** in the EC2 security group and host firewall, restrict SSH to administrators, and remove obsolete public 3000/5050/8080/9000/9001 rules after migration. Review the Terraform network-hardening procedure below before changing AWS rules.
+2. Install current Certbot (2.3+ for `reconfigure`) on the Ubuntu server, using the [official Certbot instructions](https://certbot.eff.org/instructions). For a snap installation: `sudo snap install --classic certbot`.
+3. With port 80 free on the first deployment, obtain the certificate using [Certbot standalone](https://eff-certbot.readthedocs.io/en/stable/using.html#standalone). Replace the example domain/email:
 
 ```bash
-ssh -N -L 3000:127.0.0.1:3000 -L 5050:127.0.0.1:5050 -L 19000:127.0.0.1:19000 ubuntu@YOUR_EC2_DNS_OR_IP
+sudo /snap/bin/certbot certonly --standalone --cert-name leckeep.example.com -d leckeep.example.com --email admin@example.com --agree-tos --no-eff-email
+sudo chmod 600 /etc/letsencrypt/live/leckeep.example.com/privkey.pem
 ```
 
-With the tunnel open, use http://localhost:3000 and http://localhost:5050/swagger-ui.html. Verify login, PDF upload, preview, and download. MinIO signed previews use http://localhost:19000 through the tunnel. For temporary administration only, add `-L 19001:127.0.0.1:19001` and open http://localhost:19001; restrict this to trusted administrators. Local ports must be free (stop your local stack or select matching alternative ports and rebuild the frontend).
+4. Deploy with Ansible using that domain, or use the production Compose commands above. HTTP redirects to the configured HTTPS origin, except the ACME challenge path and a non-sensitive healthcheck. Do not expose the application over an unencrypted bootstrap proxy.
+5. Once Nginx is running, switch that certificate's renewal to its shared webroot. This verifies the new authenticator before saving renewal settings:
 
-MongoDB and MinIO data remain in `<project>_mongodb_data` and `<project>_minio_data`. Do not run `docker compose down -v` during deployment. This step adds no public reverse proxy or HTTPS and does not change Terraform or enable Jenkins CD. Public browser access remains a later deployment step.
+```bash
+sudo /snap/bin/certbot reconfigure --cert-name leckeep.example.com --webroot --webroot-path /opt/leckeep/acme
+```
+
+6. Install a root-owned executable renewal hook at `/etc/letsencrypt/renewal-hooks/deploy/leckeep-reload` with the following content and mode `0700`:
+
+```sh
+#!/bin/sh
+set -eu
+docker compose --project-directory /opt/leckeep -f /opt/leckeep/docker-compose.yml -f /opt/leckeep/docker-compose.prod.yml exec -T nginx nginx -t
+docker compose --project-directory /opt/leckeep -f /opt/leckeep/docker-compose.yml -f /opt/leckeep/docker-compose.prod.yml exec -T nginx nginx -s reload
+```
+
+7. Run `sudo /snap/bin/certbot renew --dry-run` and inspect `systemctl list-timers '*certbot*'` to confirm automatic renewal. Adapt the deployment directory in the webroot command and hook if you changed it. Preserve root-only private-key permissions on renewal. See [Certbot renewal documentation](https://eff-certbot.readthedocs.io/en/stable/using.html#renewing-certificates) for hook behavior.
+
+### Verify and inspect production
+
+On an Ansible-managed host (the generated `.env` is automatically loaded):
+
+```bash
+sudo docker compose --project-directory /opt/leckeep -f /opt/leckeep/docker-compose.yml -f /opt/leckeep/docker-compose.prod.yml config --quiet
+sudo docker compose --project-directory /opt/leckeep -f /opt/leckeep/docker-compose.yml -f /opt/leckeep/docker-compose.prod.yml ps
+sudo docker compose --project-directory /opt/leckeep -f /opt/leckeep/docker-compose.yml -f /opt/leckeep/docker-compose.prod.yml exec -T nginx nginx -t
+sudo docker compose --project-directory /opt/leckeep -f /opt/leckeep/docker-compose.yml -f /opt/leckeep/docker-compose.prod.yml logs --tail=100 nginx backend
+curl -I http://leckeep.example.com/
+curl -I https://leckeep.example.com/
+```
+
+Expect HTTP 308 to HTTPS and a valid certificate on HTTPS; do not use `curl -k` as proof of production TLS. Verify frontend refresh, registration/login, PDF upload, signed preview, and authenticated download. Check that only Nginx has published ports. For manual Compose installations, include `--env-file .env.prod` in these commands. Public EC2 DNS, firewall rules, trusted certificates, registry access, and renewal still need verification on the actual server. Jenkins CD remains disabled.
+
+### Terraform network hardening
+
+`Terraform/` manages **one security group and its additive attachment to the primary network interface of an existing EC2 instance**. The EC2 instance is a data lookup; this configuration does not create or manage EC2, VPCs, databases, load balancers, or instance lifecycle. Keep the original Terraform state when updating an existing deployment. There is no remote-state backend configured by this repository.
+
+The managed group's ingress is:
+
+| Port | Source | Purpose |
+| --- | --- | --- |
+| TCP 80 | `0.0.0.0/0` | Nginx HTTP redirect and ACME challenges |
+| TCP 443 | `0.0.0.0/0` | Nginx HTTPS application/API access |
+| TCP 22 | `admin_ssh_cidr` only | Administrator SSH |
+
+There are no managed ingress rules for frontend 3000, backend 5050/8080, MongoDB 27017, or MinIO 9000/9001. Jenkins is not installed by the application playbook, and this repository does not establish that Jenkins runs on this EC2 host, so no Jenkins ingress rule is retained. If Jenkins is present, keep it private and access it through an SSH tunnel rather than reopening public 8080.
+
+If the existing instance already has IPv6 addresses, the managed group permits `::/0` only for 80/443, and allows outbound IPv6. SSH remains IPv4-CIDR restricted. This does not enable IPv6 addressing, routing, Docker bindings, or Nginx listeners; verify those separately before publishing an AAAA record. Allow-all outbound traffic is retained for DNS, package/image downloads, certificate renewal, and existing external API use.
+
+Use Terraform 1.7+ and the committed provider lockfile. Normal AWS credential resolution is used: an AWS CLI profile (`AWS_PROFILE`), AWS environment credentials/session token, or an instance role. Never put credentials in `.tf`, `.tfvars`, plans, or Git. Initialize and configure local inputs:
+
+```bash
+cd Terraform
+cp terraform.tfvars.example terraform.tfvars
+chmod 600 terraform.tfvars
+# Edit the ignored file before planning; example instance/CIDR values are documentation only.
+terraform init
+terraform fmt -check -recursive
+terraform validate
+terraform test
+```
+
+Required inputs are the actual `ec2_instance_id` and trusted `admin_ssh_cidr`; `aws_region` defaults to `us-east-1`. Prefer the administrator's public IPv4 address as `/32`, or an explicitly trusted organization range. `/0`, malformed CIDRs, and IPv6 SSH CIDRs are rejected. Do not use the example `203.0.113.10/32` as a real administrator address, and do not infer the user's IP from a CI runner or coding agent. `security_group_name` defaults to the existing `note-app-sg` to preserve deployed infrastructure. A fresh deployment without an existing managed group may choose `leckeep-app-sg` explicitly.
+
+The legacy Terraform resource addresses and immutable AWS group name/description are intentionally retained. LecKeep naming is applied using mutable tags. The security group now explicitly uses the existing instance's VPC. `prevent_destroy` on the group and attachment blocks accidental group replacement or detachment, including changes caused by a different instance/VPC/name. Do not remove these guards to get an unexpected plan through; investigate first. The new provider constraint is AWS 6.x; when recovering an older deployment, review its previous lockfile/state and the [AWS provider upgrade guide](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/guides/version-6-upgrade) before planning. Follow the guide's staged upgrade procedure if the existing state uses an older provider major version.
+
+Before applying, inspect **every security group on every network interface** of the instance using the AWS console or read-only CLI calls (replace the placeholders):
+
+```bash
+aws ec2 describe-instances --region REGION --instance-ids INSTANCE_ID --query 'Reservations[].Instances[].NetworkInterfaces[].{Interface:NetworkInterfaceId,Groups:Groups[].GroupId}'
+aws ec2 describe-security-groups --region REGION --group-ids SG_ID_1 SG_ID_2
+aws ec2 describe-network-interfaces --region REGION --filters Name=group-id,Values=MANAGED_SG_ID
+```
+
+AWS [aggregates the rules of all attached groups](https://docs.aws.amazon.com/vpc/latest/userguide/security-group-rules.html). Hardening this group cannot override a permissive rule in another group. The attachment resource adds only this SG and preserves others; it does not take ownership of the instance's full SG set. Audit and deliberately remediate obsolete public access in the other groups, respecting any other workloads they protect. Also verify whether the managed group is shared with other ENIs: changing its rules affects every attached workload. `attached_security_group_ids` exposes the groups observed by the instance lookup for review; it is a snapshot at read time, not a complete effective-firewall analysis. Other tools must not manage the same ENI group set authoritatively, as described in the [provider attachment documentation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/network_interface_sg_attachment).
+
+If the existing group/attachment already exists but its Terraform state is unavailable, recover the original state first. If that is impossible, import the verified existing resources into the retained addresses before planning (replace the identifiers; ensure variables and AWS credentials are configured):
+
+```bash
+terraform import 'aws_security_group.note-app-sg' SG_ID
+terraform import 'aws_network_interface_sg_attachment.sg_attachment' ENI_ID_SG_ID
+```
+
+The attachment import ID is the actual ENI ID and SG ID joined with an underscore. Do not create duplicate groups or silently detach existing ones because an empty state suggests a fresh deployment.
+
+Create and inspect a live plan, then apply **manually only after review**:
+
+```bash
+terraform plan -out=leckeep.tfplan
+terraform show leckeep.tfplan
+# Manual operator action only, after reviewing the complete plan:
+terraform apply leckeep.tfplan
+```
+
+For an existing managed deployment, expect ingress/tag updates to the existing group and no EC2 replacement or destructive detachment. Stop on any `-/+`, destroy action, unexpected VPC/ENI change, or `prevent_destroy` error. Confirm the new SSH CIDR from a second session before closing the original administrator session. After manual apply, verify HTTPS, SSH from the approved source, and lack of direct application/database/MinIO/Jenkins access, including the combined effects of other groups and host/container listeners.
+
+State, local `.tfvars`, saved `.tfplan` files, crash logs, and `.terraform/` are gitignored. Commit `.terraform.lock.hcl`, `.tf` sources, the safe example, and plan-only tests. `terraform test` uses a mocked provider to check ingress, IPv6 handling, VPC/ENI targeting, and invalid SSH ranges without AWS access; it does not prove live state, effective security-group exposure, or a production plan is safe. A live plan still requires current credentials, real inputs, and the original/imported state. No automatic `terraform apply` is performed.

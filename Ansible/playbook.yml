@@ -6,6 +6,8 @@
   vars_files:
     - vars/main.yml
   vars:
+    leckeep_compose_files: "{{ ['docker-compose.yml', 'docker-compose.prod.yml'] if leckeep_production | bool else ['docker-compose.yml'] }}"
+    leckeep_compose_args: "{{ ['-f', 'docker-compose.yml', '-f', 'docker-compose.prod.yml'] if leckeep_production | bool else ['-f', 'docker-compose.yml'] }}"
     leckeep_jwt_secret: "{{ lookup('ansible.builtin.env', 'JWT_SECRET') }}"
     leckeep_minio_access_key: "{{ lookup('ansible.builtin.env', 'MINIO_ACCESS_KEY') }}"
     leckeep_minio_secret_key: "{{ lookup('ansible.builtin.env', 'MINIO_SECRET_KEY') }}"
@@ -46,6 +48,37 @@
         - "{{ leckeep_jwt_secret }}"
       no_log: true
 
+    - name: Validate the production domain, origin, and bucket route
+      ansible.builtin.assert:
+        that:
+          - leckeep_domain is match('^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$')
+          - leckeep_public_origin is match('^https://' ~ (leckeep_domain | regex_escape) ~ '(:[0-9]{1,5})?$')
+          - leckeep_tls_cert_dir is match('^/.+')
+          - leckeep_minio_bucket is match('^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$')
+          - leckeep_minio_bucket not in ['api', 'assets']
+        fail_msg: Supply APP_DOMAIN (or leckeep_domain), a matching HTTPS origin, an absolute certificate directory, and a valid bucket name.
+      when: leckeep_production | bool
+
+    - name: Check existing TLS files without reading private-key contents
+      ansible.builtin.stat:
+        path: "{{ leckeep_tls_cert_dir }}/live/{{ leckeep_domain }}/{{ item }}"
+        follow: true
+        get_checksum: false
+        get_mime: false
+      loop: [fullchain.pem, privkey.pem]
+      register: leckeep_tls_files
+      when: leckeep_production | bool
+
+    - name: Require host-provided certificates and protected private-key permissions
+      ansible.builtin.assert:
+        that:
+          - leckeep_tls_files.results[0].stat.exists
+          - leckeep_tls_files.results[1].stat.exists
+          - leckeep_tls_files.results[1].stat.mode in ['0600', '0640']
+          - leckeep_tls_files.results[1].stat.pw_name == 'root'
+        fail_msg: Obtain TLS certificates before deployment; the root-owned private key must have mode 0600 or 0640. See the production HTTPS instructions.
+      when: leckeep_production | bool
+
   tasks:
     - name: Prepare Docker on the application host
       ansible.builtin.import_tasks: tasks/prepare-host.yml
@@ -60,7 +93,7 @@
     - name: Require a supported Compose plugin
       ansible.builtin.assert:
         that:
-          - leckeep_compose_version.stdout | regex_replace('^v', '') is version('2.18.0', '>=')
+          - leckeep_compose_version.stdout | regex_replace('^v', '') is version('2.24.4', '>=')
 
     - name: Create the deployment directory
       ansible.builtin.file:
@@ -74,6 +107,30 @@
         dest: "{{ leckeep_deployment_dir }}/docker-compose.yml"
         mode: '0644'
 
+    - name: Copy the production Compose override
+      ansible.builtin.copy:
+        src: ../docker-compose.prod.yml
+        dest: "{{ leckeep_deployment_dir }}/docker-compose.prod.yml"
+        mode: '0644'
+      when: leckeep_production | bool
+
+    - name: Create the proxy configuration and ACME directories
+      ansible.builtin.file:
+        path: "{{ leckeep_deployment_dir }}/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop: [docker/nginx/templates, acme]
+      when: leckeep_production | bool
+
+    - name: Copy the public Nginx configuration
+      ansible.builtin.copy:
+        src: ../docker/nginx/templates/
+        dest: "{{ leckeep_deployment_dir }}/docker/nginx/templates/"
+        mode: '0644'
+        directory_mode: '0755'
+      when: leckeep_production | bool
+      notify: Reload public Nginx configuration
+
     - name: Create the private runtime environment
       ansible.builtin.template:
         src: runtime.env.j2
@@ -84,7 +141,7 @@
 
     - name: Validate the rendered Compose configuration without printing secrets
       ansible.builtin.command:
-        argv: [docker, compose, config, --quiet]
+        argv: "{{ ['docker', 'compose'] + leckeep_compose_args + ['config', '--quiet'] }}"
         chdir: "{{ leckeep_deployment_dir }}"
       changed_when: false
       when: not ansible_check_mode
@@ -103,6 +160,7 @@
     - name: Pull and reconcile the complete stack without building on EC2
       community.docker.docker_compose_v2:
         project_src: "{{ leckeep_deployment_dir }}"
+        files: "{{ leckeep_compose_files }}"
         state: present
         build: never
         pull: "{{ leckeep_pull_policy }}"
@@ -114,9 +172,12 @@
       when: not ansible_check_mode
       no_log: true
 
+    - name: Apply proxy configuration changes after service reconciliation
+      ansible.builtin.meta: flush_handlers
+
     - name: Read service status
       ansible.builtin.command:
-        argv: [docker, compose, ps, --all, --format, json]
+        argv: "{{ ['docker', 'compose'] + leckeep_compose_args + ['ps', '--all', '--format', 'json'] }}"
         chdir: "{{ leckeep_deployment_dir }}"
       register: leckeep_status
       changed_when: false
@@ -125,7 +186,7 @@
     - name: Verify all required services are running and healthy
       ansible.builtin.assert:
         that:
-          - leckeep_containers | map(attribute='Service') | sort == leckeep_images.keys() | sort
+          - leckeep_containers | map(attribute='Service') | sort == (leckeep_images.keys() | list + (['nginx'] if leckeep_production | bool else [])) | sort
           - leckeep_containers | rejectattr('State', 'equalto', 'running') | list | length == 0
           - leckeep_containers | rejectattr('Health', 'equalto', 'healthy') | list | length == 0
         fail_msg: A required LecKeep service is missing, stopped, or unhealthy. Inspect docker compose ps and logs on the host.
@@ -133,3 +194,12 @@
         # Compose emits one JSON object per line (older releases may emit an array).
         leckeep_containers: "{{ (leckeep_status.stdout | from_json) if leckeep_status.stdout.startswith('[') else (leckeep_status.stdout_lines | map('from_json') | list) }}"
       when: not ansible_check_mode
+
+  handlers:
+    - name: Reload public Nginx configuration
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'compose'] + leckeep_compose_args + ['exec', '-T', 'nginx', 'sh', '-c', '/docker-entrypoint.d/20-envsubst-on-templates.sh && nginx -t && nginx -s reload'] }}"
+        chdir: "{{ leckeep_deployment_dir }}"
+      when:
+        - leckeep_production | bool
+        - not ansible_check_mode

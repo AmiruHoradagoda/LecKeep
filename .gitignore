@@ -2,8 +2,26 @@
 .env
 .env.*
 !.env.example
+!.env.prod.example
+
+# Certificates/keys are supplied by the host, never the repository.
+*.pem
+*.key
+acme/
 
 # Local deployment inventory and secret variable overrides.
 Ansible/inventory.ini
 Ansible/secrets*.yml
 Ansible/secrets*.yaml
+
+# Terraform working data, local inputs, state, and saved plans can contain private values.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+*.tfplan
+crash.log
+crash.*.log
+# Keep .terraform.lock.hcl and .tf/.tftest.hcl source files under version control.

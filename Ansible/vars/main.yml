@@ -6,6 +6,14 @@ leckeep_prepare_host: true
 leckeep_wait_timeout: 180
 leckeep_pull_policy: always
 leckeep_registry_url: https://index.docker.io/v1/
+leckeep_production: true
+leckeep_domain: "{{ lookup('ansible.builtin.env', 'APP_DOMAIN') }}"
+leckeep_public_origin: "https://{{ leckeep_domain }}"
+leckeep_tls_cert_dir: /etc/letsencrypt
+leckeep_http_port: 80
+leckeep_https_port: 443
+leckeep_proxy_bind_address: 0.0.0.0
+leckeep_nginx_image: nginx:alpine
 leckeep_images:
   backend: amiru1234/leckeep-backend:latest
   frontend: amiru1234/leckeep-frontend:latest
@@ -13,7 +21,7 @@ leckeep_images:
   # Publish docker/minio/Dockerfile, then supply its registry image reference.
   minio: "{{ lookup('ansible.builtin.env', 'DOCKER_IMAGE_MINIO') }}"
 
-# Keep loopback-only bindings; use SSH tunnels from the workstation.
+# Used only when leckeep_production=false (the original development stack).
 leckeep_browser_host: localhost
 leckeep_frontend_port: 3000
 leckeep_backend_port: 5050

@@ -5,6 +5,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import com.devProject.leckeep_backend.exception.FolderNotFoundException;
 import com.devProject.leckeep_backend.exception.GroupNotFoundException;
@@ -13,6 +14,12 @@ import com.devProject.leckeep_backend.utils.StandardResponseDto;
 
 @RestControllerAdvice
 public class AppWideExceptionHandler {
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<StandardResponseDto> handleUploadSizeExceeded(MaxUploadSizeExceededException ex) {
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+                .body(new StandardResponseDto(413, "File size must not exceed 25 MB", null));
+    }
+
     @ExceptionHandler(FolderNotFoundException.class)
     public ResponseEntity<StandardResponseDto> handleBadRequestException(FolderNotFoundException ex) {
         return new ResponseEntity<StandardResponseDto>(

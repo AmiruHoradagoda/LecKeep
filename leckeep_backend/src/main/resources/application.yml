@@ -3,6 +3,10 @@ spring:
     name: NoteApp
   profiles:
     active: dev
+  servlet:
+    multipart:
+      max-file-size: 25MB
+      max-request-size: 26MB
 
 server:
   port: 8081

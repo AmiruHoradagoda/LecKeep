@@ -1,0 +1,63 @@
+# Use with: docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml ...
+# Compose 2.24.4+ is required. Reset prevents development ports being appended on merge.
+services:
+  frontend:
+    ports: !reset []
+    build:
+      args:
+        VITE_API_URL: /api/v1
+
+  backend:
+    ports: !reset []
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SERVER_FORWARD_HEADERS_STRATEGY: framework
+      MINIO_PUBLIC_URL: ${PUBLIC_ORIGIN:-https://${APP_DOMAIN:?Set APP_DOMAIN}}
+      CORS_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:-https://${APP_DOMAIN:?Set APP_DOMAIN}}
+      JWT_SECRET: ${JWT_SECRET:?Supply a private JWT_SECRET}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Supply private MinIO credentials}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Supply private MinIO credentials}
+
+  minio:
+    ports: !reset []
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?Supply private MinIO credentials}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?Supply private MinIO credentials}
+
+  nginx:
+    image: ${NGINX_IMAGE:-nginx:alpine}
+    restart: unless-stopped
+    ports:
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:${HTTP_PORT:-80}:80"
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:${HTTPS_PORT:-443}:443"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://${APP_DOMAIN}}
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-leckeep-documents}
+      NGINX_ENVSUBST_FILTER: '^(APP_DOMAIN|PUBLIC_ORIGIN|MINIO_BUCKET_NAME)$'
+    volumes:
+      - type: bind
+        source: ./docker/nginx/templates
+        target: /etc/nginx/templates
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TLS_CERT_DIR:-/etc/letsencrypt}
+        target: /etc/nginx/tls
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./acme:/var/www/certbot:ro
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5

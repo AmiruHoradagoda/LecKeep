@@ -1,0 +1,8 @@
+# Documentation-only values. Replace in your ignored terraform.tfvars.
+aws_region         = "us-east-1"
+ec2_instance_id    = "i-0123456789abcdef0"
+admin_ssh_cidr     = "203.0.113.10/32"
+
+# Keep the legacy name for an existing managed deployment to avoid replacement.
+# A fresh, unmanaged deployment may explicitly choose "leckeep-app-sg" instead.
+security_group_name = "note-app-sg"
