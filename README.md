@@ -334,18 +334,3 @@ Auth endpoints return an `AuthenticationResponse` directly.
 - `leckeep_frontend/.env.production` points the production frontend to `https://app.amiru-web.xyz/api/v1`.
 
 Before production deployment, review secrets, exposed ports, Docker image names, backend port configuration, and the MongoDB/MinIO runtime configuration.
-
-## Documentation
-
-- `architecture-design.md` contains the target architecture and implementation roadmap.
-- `future-plan.md` contains planned improvements and next phases.
-- `leckeep_frontend/README.md` contains frontend-specific setup notes.
-
-## Known Gaps
-
-- Search endpoint is not fully implemented.
-- `FolderPermissionService` is currently empty, so access-control logic should be reviewed before production use.
-- The S3 storage adapter exists as a placeholder and throws `UnsupportedOperationException`.
-- Docker Compose does not include MongoDB or MinIO services yet.
-- Docker and application port settings need alignment before relying on compose for deployment.
-- Test coverage is currently limited to a Spring context-load test.
