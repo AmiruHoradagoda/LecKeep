@@ -3,9 +3,14 @@ import { Bell, Search } from "lucide-react";
 import { Input } from "../ui/Input";
 import { apiFetch, getUserId } from "../../lib/apiClient";
 
-const NavBar = ({ onSearch }) => {
+const NavBar = ({ onSearch, searchQuery, onSearchInput }) => {
   const [user, setUser] = useState(null);
-  const [searchQuery, setSearchQuery] = useState("");
+
+  useEffect(() => {
+    if (!searchQuery.trim()) return;
+    const timer = setTimeout(() => onSearch(searchQuery), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery, onSearch]);
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -25,8 +30,7 @@ const NavBar = ({ onSearch }) => {
 
   const handleSearch = (event) => {
     const query = event.target.value;
-    setSearchQuery(query);
-    onSearch?.(getUserId(), query);
+    onSearchInput(query);
   };
 
   const username = user?.username || "CE Student";
@@ -40,6 +44,8 @@ const NavBar = ({ onSearch }) => {
           <Input
             value={searchQuery}
             onChange={handleSearch}
+            maxLength={100}
+            aria-label="Search academic resources"
             placeholder="Search architecture, Verilog, networks..."
             className="h-12 rounded-lg border-0 bg-[#eef6fb] pl-12 shadow-none"
           />

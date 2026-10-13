@@ -3,6 +3,7 @@ package com.devProject.leckeep_backend;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.data.mongodb.core.MongoTemplate;
 
 import com.devProject.leckeep_backend.repository.DocumentFileRepository;
 import com.devProject.leckeep_backend.repository.FolderShareRepository;
@@ -18,6 +19,9 @@ import io.minio.MinioClient;
 		"spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.mongo.MongoAutoConfiguration,org.springframework.boot.autoconfigure.data.mongo.MongoDataAutoConfiguration"
 })
 class NoteAppApplicationTests {
+
+	@MockBean
+	private MongoTemplate mongoTemplate;
 
 	@MockBean
 	private UserRepository userRepository;

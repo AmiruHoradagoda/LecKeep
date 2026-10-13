@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   BookOpen,
@@ -34,7 +34,7 @@ import { addGroupMember, createGroup, getGroups } from "../groups/groups.api";
 import GroupsView from "../groups/GroupsView";
 import { createSubject, deleteSubject, getSubjects } from "../subjects/subjects.api";
 import SubjectsView from "../subjects/SubjectsView";
-import { createFolder, deleteFolder, getFolders, updateFolder } from "../folders/folders.api";
+import { createFolder, deleteFolder, getFolder, getFolders, updateFolder } from "../folders/folders.api";
 import FoldersView from "../folders/FoldersView";
 import DocumentPreviewDialog from "../documents/DocumentPreviewDialog";
 import { getDocumentDownloadUrl, getFolderDocuments, previewDocument, uploadDocument } from "../documents/documents.api";
@@ -113,6 +113,7 @@ const normalizeSubject = (subject) => {
   }
 
   return {
+    id: subject?.id,
     name: subject?.name?.trim() || "",
     semester: semesters.includes(subject?.semester) ? subject.semester : "Semester 1",
   };
@@ -169,7 +170,17 @@ const getDocumentIcon = (fileName, size = 38) => {
   return <FileText className={colorClass} size={size} />;
 };
 
-const MainContent = ({ activeSection = "subjects", searchResults }) => {
+const MainContent = ({ activeSection = "subjects", searchResults, searchQuery = "", searchLoading, searchError, onNavigate }) => {
+  const [resultOpening, setResultOpening] = useState(false);
+  const [resultOpenError, setResultOpenError] = useState("");
+  const resultRequest = useRef(0);
+
+  useEffect(() => {
+    resultRequest.current += 1;
+    setResultOpening(false);
+    setResultOpenError("");
+    return () => { resultRequest.current += 1; };
+  }, [searchQuery, activeSection]);
   const [notes, setNotes] = useState([]);
   const [subjects, setSubjects] = useState([]);
   const [groups, setGroups] = useState([]);
@@ -599,6 +610,82 @@ const MainContent = ({ activeSection = "subjects", searchResults }) => {
       setDocumentPreviewLoading(false);
     }
   };
+
+  const openSearchResult = async (result) => {
+    if (result.type === "SUBJECT") {
+      setSelectedNote(null);
+      setActiveNoteScope("private");
+      setFilters({ semester: "all", subject: result.name, category: "all" });
+      onNavigate("notes");
+      return;
+    }
+    const requestId = ++resultRequest.current;
+    setResultOpening(true);
+    setResultOpenError("");
+    try {
+      const folderId = result.type === "DOCUMENT" ? result.folderId : result.id;
+      const folder = await getFolder(folderId);
+      const page = await getFolderDocuments(folderId, { size: 100 });
+      if (requestId !== resultRequest.current) return;
+      const documents = page?.dataList || [];
+      const subject = subjects.find((item) => item.id === folder.subjectId);
+      setSelectedNote({
+        ...folderToNote(folder, subjects, documents),
+        subject: subject?.name || "General",
+        subjectId: folder.subjectId,
+        semester: folder.semester,
+        category: toFolderCategoryLabel(folder.category),
+        categoryValue: folder.category,
+        visibility: toVisibilityUiValue(folder.visibility),
+        groupId: folder.groupId,
+        documents,
+      });
+      onNavigate("notes");
+      if (result.type === "DOCUMENT") {
+        // The matching document may be outside the folder's first page.
+        openDocumentPreview(documents.find((item) => item.id === result.id) || {
+          id: result.id, originalName: result.name, contentType: result.contentType, extension: result.extension,
+        });
+      }
+    } catch (err) {
+      if (requestId === resultRequest.current) setResultOpenError(err.message || "Could not open resource.");
+    } finally {
+      if (requestId === resultRequest.current) setResultOpening(false);
+    }
+  };
+
+  const renderSearch = () => (
+    <section aria-label="Search results" className="space-y-5">
+      <PageHeader title="Search" description={`Results for “${searchQuery.trim()}”`} />
+      {searchLoading ? <p role="status">Searching…</p> : searchError ? (
+        <p role="alert" className="text-destructive">{searchError}</p>
+      ) : searchResults?.length ? (
+        <>
+          <p className="text-sm text-muted-foreground">{searchResults.length} results · Up to 20 per resource type</p>
+          {resultOpenError && <p role="alert" className="text-destructive">{resultOpenError}</p>}
+          {resultOpening && <p role="status">Opening resource…</p>}
+          {["SUBJECT", "FOLDER", "DOCUMENT"].map((type) => {
+            const results = searchResults.filter((result) => result.type === type);
+            if (!results.length) return null;
+            return (
+              <div key={type} className="space-y-3">
+                <h2 className="text-lg font-bold">{{ SUBJECT: "Subjects", FOLDER: "Folders", DOCUMENT: "Documents" }[type]}</h2>
+                {results.map((result) => (
+                  <button type="button" key={`${type}-${result.id}`} disabled={resultOpening}
+                    onClick={() => openSearchResult(result)}
+                    className="flex w-full items-center gap-4 rounded-xl border border-border bg-white p-4 text-left hover:bg-muted disabled:opacity-60">
+                    {type === "SUBJECT" ? <BookOpen size={22} /> : type === "FOLDER" ? <Folder size={22} /> : <FileText size={22} />}
+                    <span className="min-w-0 flex-1 break-words font-semibold">{result.name}</span>
+                    <Badge variant="outline">{type}</Badge>
+                  </button>
+                ))}
+              </div>
+            );
+          })}
+        </>
+      ) : <p role="status">No results found.</p>}
+    </section>
+  );
 
   const handleCreateGroup = async (event) => {
     event.preventDefault();
@@ -1571,7 +1658,7 @@ const MainContent = ({ activeSection = "subjects", searchResults }) => {
     );
   };
 
-  if (loading) {
+  if (loading && activeSection !== "search") {
     return (
       <div className="flex min-h-[60vh] items-center justify-center">
         <div className="h-9 w-9 animate-spin rounded-full border-4 border-secondary border-t-primary" />
@@ -1597,6 +1684,7 @@ const MainContent = ({ activeSection = "subjects", searchResults }) => {
       />
 
       {activeSection === "dashboard" && <DashboardView>{renderDashboard()}</DashboardView>}
+      {activeSection === "search" && renderSearch()}
       {activeSection === "notes" && <NotesView>{renderNotes()}</NotesView>}
       {activeSection === "add" && <AddNoteDialog>{renderAddNote()}</AddNoteDialog>}
       {activeSection === "groups" && <GroupsView>{renderGroups()}</GroupsView>}
