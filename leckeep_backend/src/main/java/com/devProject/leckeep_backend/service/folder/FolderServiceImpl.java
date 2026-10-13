@@ -2,6 +2,7 @@ package com.devProject.leckeep_backend.service.folder;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
@@ -27,6 +28,7 @@ public class FolderServiceImpl implements FolderService {
     private final NoteFolderRepository noteFolderRepository;
     private final NoteFolderMapper noteFolderMapper;
     private final CurrentUserService currentUserService;
+    private final FolderPermissionService folderPermissionService;
 
     @Override
     public NoteFolderPaginateResponseDto getFolders(String scope, int page, int size) {
@@ -45,7 +47,7 @@ public class FolderServiceImpl implements FolderService {
                     pageable
             );
             case "global" -> noteFolderRepository.findByVisibility(FolderVisibility.GLOBAL, pageable);
-            case "group" -> noteFolderRepository.findByVisibility(FolderVisibility.GROUP, pageable);
+            case "group" -> getReadableGroupFolders(pageable);
             case "shared" -> noteFolderRepository.findByOwnerIdAndVisibilityIn(
                     currentUserService.requireCurrentUserId(),
                     List.of(FolderVisibility.GLOBAL, FolderVisibility.GROUP),
@@ -68,7 +70,7 @@ public class FolderServiceImpl implements FolderService {
     @Override
     public NoteFolderResponseDto getFolderById(String id) {
         NoteFolder noteFolder = findFolderOrThrow(id);
-        requireFolderReadAccess(noteFolder);
+        folderPermissionService.requireReadAccess(noteFolder);
         return noteFolderMapper.toNoteFolderResponseDto(noteFolder);
     }
 
@@ -125,10 +127,16 @@ public class FolderServiceImpl implements FolderService {
         }
     }
 
-    private void requireFolderReadAccess(NoteFolder noteFolder) {
-        if (noteFolder.getVisibility() == FolderVisibility.PRIVATE) {
-            requireFolderOwner(noteFolder);
-        }
+    private Page<NoteFolder> getReadableGroupFolders(Pageable pageable) {
+        // Authorize before pagination so counts and pages cannot expose inaccessible folders.
+        List<NoteFolder> readable = noteFolderRepository
+                .findByVisibility(FolderVisibility.GROUP, Pageable.unpaged(pageable.getSort()))
+                .stream()
+                .filter(folderPermissionService::canRead)
+                .toList();
+        int start = (int) Math.min(pageable.getOffset(), readable.size());
+        int end = (int) Math.min((long) start + pageable.getPageSize(), readable.size());
+        return new PageImpl<>(readable.subList(start, end), pageable, readable.size());
     }
 
     private void requireFolderOwner(NoteFolder noteFolder) {

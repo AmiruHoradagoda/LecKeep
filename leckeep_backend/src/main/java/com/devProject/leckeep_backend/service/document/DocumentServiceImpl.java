@@ -4,7 +4,6 @@ import com.devProject.leckeep_backend.dto.response.DocumentDownloadResponseDto;
 import com.devProject.leckeep_backend.dto.response.DocumentFileResponseDto;
 import com.devProject.leckeep_backend.dto.response.DocumentPreviewResponseDto;
 import com.devProject.leckeep_backend.dto.response.pagination.DocumentFilePaginateResponseDto;
-import com.devProject.leckeep_backend.enums.FolderVisibility;
 import com.devProject.leckeep_backend.enums.PreviewMode;
 import com.devProject.leckeep_backend.exception.FolderNotFoundException;
 import com.devProject.leckeep_backend.mappers.DocumentFileMapper;
@@ -13,6 +12,7 @@ import com.devProject.leckeep_backend.model.NoteFolder;
 import com.devProject.leckeep_backend.repository.DocumentFileRepository;
 import com.devProject.leckeep_backend.repository.NoteFolderRepository;
 import com.devProject.leckeep_backend.service.auth.CurrentUserService;
+import com.devProject.leckeep_backend.service.folder.FolderPermissionService;
 import com.devProject.leckeep_backend.service.document.storage.DownloadedObject;
 import com.devProject.leckeep_backend.service.document.storage.FileUploadCommand;
 import com.devProject.leckeep_backend.service.document.storage.ObjectStorageService;
@@ -52,6 +52,7 @@ public class DocumentServiceImpl implements DocumentService {
     private final ObjectStorageService objectStorageService;
     private final FileTypeHandlerResolver fileTypeHandlerResolver;
     private final DocumentFileMapper documentFileMapper;
+    private final FolderPermissionService folderPermissionService;
 
     @Override
     public DocumentFileResponseDto uploadDocument(String folderId, MultipartFile file) {
@@ -87,7 +88,7 @@ public class DocumentServiceImpl implements DocumentService {
     public DocumentFilePaginateResponseDto getFolderDocuments(String folderId, int page, int size) {
         NoteFolder folder = noteFolderRepository.findById(folderId)
                 .orElseThrow(() -> new FolderNotFoundException("Folder not found with id: " + folderId));
-        requireFolderReadAccess(folder);
+        folderPermissionService.requireReadAccess(folder);
 
         Pageable pageable = PaginationUtils.buildPageable(
                 page,
@@ -111,7 +112,7 @@ public class DocumentServiceImpl implements DocumentService {
         DocumentFile documentFile = findDocumentOrThrow(documentId);
         NoteFolder folder = noteFolderRepository.findById(documentFile.getFolderId())
                 .orElseThrow(() -> new FolderNotFoundException("Folder not found with id: " + documentFile.getFolderId()));
-        requireFolderReadAccess(folder);
+        folderPermissionService.requireReadAccess(folder);
 
         DownloadedObject downloadedObject = objectStorageService.download(documentFile.getStoredKey());
         return DocumentDownloadResponseDto.builder()
@@ -128,7 +129,7 @@ public class DocumentServiceImpl implements DocumentService {
         DocumentFile documentFile = findDocumentOrThrow(documentId);
         NoteFolder folder = noteFolderRepository.findById(documentFile.getFolderId())
                 .orElseThrow(() -> new FolderNotFoundException("Folder not found with id: " + documentFile.getFolderId()));
-        requireFolderReadAccess(folder);
+        folderPermissionService.requireReadAccess(folder);
 
         FileTypeHandler fileTypeHandler = fileTypeHandlerResolver.resolve(
                 documentFile.getContentType(),
@@ -185,13 +186,6 @@ public class DocumentServiceImpl implements DocumentService {
 
     private boolean isInlinePreview(PreviewMode previewMode) {
         return previewMode == PreviewMode.INLINE_IMAGE || previewMode == PreviewMode.INLINE_PDF;
-    }
-
-    private void requireFolderReadAccess(NoteFolder folder) {
-        if (folder.getVisibility() == FolderVisibility.PRIVATE) {
-            String currentUserId = currentUserService.requireCurrentUserId();
-            requireFolderOwner(folder, currentUserId, "You do not have access to this document");
-        }
     }
 
     private void requireFolderOwner(NoteFolder folder, String currentUserId, String message) {
