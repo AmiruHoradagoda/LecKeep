@@ -10,7 +10,7 @@ The repository contains a Spring Boot backend, a React/Vite frontend, and deploy
 LecKeep/
   leckeep_backend/      Spring Boot API for auth, users, subjects, folders, documents, groups, and sharing
   leckeep_frontend/     React + Vite client application
-  ansible/              EC2 Docker deployment playbook
+  Ansible/              EC2 Docker deployment playbook
   terraform/            AWS security group and EC2 lookup configuration
   docker-compose.yml    Local container orchestration scaffold
   Jenkinsfile           CI/CD pipeline scaffold
@@ -374,9 +374,65 @@ Validate the Jenkinsfile with the target Jenkins controller's Declarative Pipeli
 
 ## Deployment Notes
 
-- Jenkins currently stops at Docker Hub image publication; EC2 deployment is not part of this CI pipeline.
-- `ansible/playbook.yml` pulls and restarts Docker containers on an EC2 host.
-- `terraform/main.tf` attaches a security group to an existing EC2 instance.
-- `leckeep_frontend/.env.production` points the production frontend to `https://app.amiru-web.xyz/api/v1`.
+### Ansible deployment
 
-Before production deployment, review secrets, exposed ports, Docker image names, backend port configuration, and the MongoDB/MinIO runtime configuration.
+Run Ansible from Linux, macOS, or Ubuntu WSL with Python and `ansible-core` 2.19+. Install the collection declared in `Ansible/requirements.yml`:
+
+```bash
+ansible-galaxy collection install -r Ansible/requirements.yml
+cp Ansible/inventory.example.ini Ansible/inventory.ini
+```
+
+Edit the ignored inventory with the current EC2 DNS/IP, SSH user, and local private-key path (or use `ssh-agent`). Verify the server's SSH fingerprint and add it to your known hosts. Host-key checking stays enabled. Never commit an SSH key or real inventory.
+
+The target needs Python 3, SSH access, passwordless sudo (or use `--ask-become-pass`), internet access to Docker's package repository and image registry, and enough disk for images and persistent data. Automatic host preparation installs Docker Engine and its Compose plugin from the [official Docker Ubuntu repository](https://docs.docker.com/engine/install/ubuntu/) on Ubuntu 22.04+ (amd64/arm64), then enables Docker. It does not install Jenkins or remove existing Docker packages. If the host already has a working Docker/Compose installation, use `-e leckeep_prepare_host=false`; Python `requests` is also needed for optional registry login. Compose must be version 2.18+.
+
+`Ansible/vars/main.yml` contains non-secret defaults: `/opt/leckeep`, project name `leckeep`, image references, host ports, database/bucket names, and CORS origins. Override these with `-e @path/to/deployment-vars.yml`. Keep the project name stable across releases so the same named volumes are reused. Image maps must specify all four services; prefer release tags or digests for controlled releases.
+
+Before deployment, publish backend/frontend images using the existing Jenkins pipeline or your existing image build/push process. Jenkins remains CI-only. **Build the frontend with `VITE_API_URL=http://localhost:5050/api/v1` for the default SSH-tunnel setup below.** The Jenkins default `/api/v1` needs a reverse proxy, which this step does not provide. Changing Ansible variables cannot change an API URL already baked into a frontend image.
+
+MinIO is built from source locally and is not currently published by Jenkins. Publish that image to a registry accessible by EC2, for example (replace `YOUR_NAMESPACE` and the release tag):
+
+```bash
+docker build -t YOUR_NAMESPACE/leckeep-minio:source-2025-10-15 docker/minio
+docker push YOUR_NAMESPACE/leckeep-minio:source-2025-10-15
+export DOCKER_IMAGE_MINIO=YOUR_NAMESPACE/leckeep-minio:source-2025-10-15
+```
+
+Supply these secrets through the Ansible controller's environment or an untracked/encrypted extra-vars file using the `leckeep_*` variable names in the playbook:
+
+| Controller environment | Ansible variable | Requirement |
+| --- | --- | --- |
+| `JWT_SECRET` | `leckeep_jwt_secret` | Base64-encoded key of at least 32 bytes; generate with `openssl rand -base64 48` |
+| `MINIO_ACCESS_KEY` | `leckeep_minio_access_key` | Explicit MinIO username, at least 3 characters |
+| `MINIO_SECRET_KEY` | `leckeep_minio_secret_key` | Strong MinIO password, at least 8 characters |
+| `DOCKER_USERNAME` | `leckeep_registry_username` | Optional registry username |
+| `DOCKER_PASSWORD` | `leckeep_registry_password` | Optional registry access token; supply both registry values together |
+
+Development defaults are rejected. Runtime secrets must be single-line and must not contain `${`, which the current Spring configuration interprets as a nested property placeholder. Ordinary dollar signs, quotes, spaces, and backslashes are preserved. Do not pass secret values directly on the command line, print them, or copy the development `.env` to EC2. Runtime `.env` is generated under the deployment directory with permissions `0600`; secret tasks suppress logs and diffs. Registry authentication is stored in the deployment user's Docker configuration (root with default `become: true`). Secrets files named `Ansible/secrets*.yml`/`.yaml` are ignored; protect any local secret file with `chmod 600` or encrypt it with Ansible Vault. Changing MinIO credentials on an existing stack requires keeping server and backend values synchronized; changing the JWT key invalidates existing tokens.
+
+Deploy, then run the same command again to check repeatability:
+
+```bash
+ansible-playbook -i Ansible/inventory.ini Ansible/playbook.yml --syntax-check
+ansible-playbook -i Ansible/inventory.ini Ansible/playbook.yml
+```
+
+The playbook renders `/opt/leckeep/docker-compose.yml` from the repository's Compose definition, substituting registry images and removing local build instructions. Ports, dependencies, healthchecks, environment wiring, and persistent volumes remain defined by Compose. It validates the configuration without printing secrets, pulls images, runs Compose with automatic recreation and health waiting, removes only orphans within the selected project, and fails if any of the four required services is missing or unhealthy. It never stops/removes individual application containers first and never deletes volumes. Same-image redeployments retain running containers; updated images/configuration can recreate affected containers. No automatic rollback is provided.
+
+On the server, inspect status and logs:
+
+```bash
+sudo docker compose --project-directory /opt/leckeep ps
+sudo docker compose --project-directory /opt/leckeep logs --tail=100 frontend backend mongodb minio
+```
+
+The stack retains loopback-only ports. MongoDB has no published port, and MinIO API/console are not publicly exposed. From your workstation, forward the application and preview ports (replace the SSH destination; adjust both local/server ports if you changed defaults):
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 -L 5050:127.0.0.1:5050 -L 19000:127.0.0.1:19000 ubuntu@YOUR_EC2_DNS_OR_IP
+```
+
+With the tunnel open, use http://localhost:3000 and http://localhost:5050/swagger-ui.html. Verify login, PDF upload, preview, and download. MinIO signed previews use http://localhost:19000 through the tunnel. For temporary administration only, add `-L 19001:127.0.0.1:19001` and open http://localhost:19001; restrict this to trusted administrators. Local ports must be free (stop your local stack or select matching alternative ports and rebuild the frontend).
+
+MongoDB and MinIO data remain in `<project>_mongodb_data` and `<project>_minio_data`. Do not run `docker compose down -v` during deployment. This step adds no public reverse proxy or HTTPS and does not change Terraform or enable Jenkins CD. Public browser access remains a later deployment step.

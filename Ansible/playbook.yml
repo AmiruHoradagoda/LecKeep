@@ -1,54 +1,135 @@
 ---
-- name: Deploy Docker containers to EC2
+- name: Deploy the LecKeep Compose stack
   hosts: ec2
-  become: yes
-  
+  become: true
+  serial: 1
+  vars_files:
+    - vars/main.yml
   vars:
-    backend_container: "{{ lookup('env', 'DOCKER_CONTAINER_BACKEND') }}"
-    frontend_container: "{{ lookup('env', 'DOCKER_CONTAINER_FRONTEND') }}"
-    backend_image: "{{ lookup('env', 'DOCKER_IMAGE_BACKEND') }}"  
-    frontend_image: "{{ lookup('env', 'DOCKER_IMAGE_FRONTEND') }}"
-    backend_port: "8080"
-    frontend_port: "3000"
-  
+    leckeep_jwt_secret: "{{ lookup('ansible.builtin.env', 'JWT_SECRET') }}"
+    leckeep_minio_access_key: "{{ lookup('ansible.builtin.env', 'MINIO_ACCESS_KEY') }}"
+    leckeep_minio_secret_key: "{{ lookup('ansible.builtin.env', 'MINIO_SECRET_KEY') }}"
+    leckeep_registry_username: "{{ lookup('ansible.builtin.env', 'DOCKER_USERNAME') }}"
+    leckeep_registry_password: "{{ lookup('ansible.builtin.env', 'DOCKER_PASSWORD') }}"
+
+  pre_tasks:
+    - name: Validate deployment settings before changing the host
+      ansible.builtin.assert:
+        that:
+          - leckeep_deployment_dir is match('^/.+')
+          - leckeep_project_name is match('^[a-z0-9][a-z0-9_-]*$')
+          - leckeep_pull_policy in ['always', 'missing', 'never']
+          - leckeep_images.keys() | sort == ['backend', 'frontend', 'minio', 'mongodb']
+          - item.value | length > 0
+          - item.value is not search('[\s\r\n]')
+        fail_msg: Supply valid deployment settings and a published image for every service.
+      loop: "{{ leckeep_images | dict2items }}"
+
+    - name: Require explicit runtime secrets and paired registry credentials
+      ansible.builtin.assert:
+        that:
+          - leckeep_minio_access_key | length >= 3
+          - leckeep_minio_secret_key | length >= 8
+          - leckeep_minio_access_key not in ['minioadmin', 'leckeep-local']
+          - leckeep_minio_secret_key not in ['minioadmin', 'leckeep-local-change-me']
+          - leckeep_jwt_secret | length >= 44
+          - leckeep_jwt_secret is match('^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$')
+          - not (leckeep_jwt_secret | length == 44 and leckeep_jwt_secret.endswith('=='))
+          - leckeep_jwt_secret not in ['bGVja2VlcC1kZXZlbG9wbWVudC1vbmx5LWp3dC1zZWNyZXQtMzItYnl0ZXM=', 'VGhpcy1pcy1hLWRldi1vbmx5LWp3dC1zZWNyZXQtMzItYnl0ZXM=']
+          - (leckeep_registry_username | length > 0) == (leckeep_registry_password | length > 0)
+          - item | string is not search('[\r\n\x00]')
+          - item | string is not search('\$\{')
+        fail_msg: Supply non-development MinIO credentials, a base64 JWT key of at least 32 bytes, and both registry credentials if login is needed.
+      loop:
+        - "{{ leckeep_minio_access_key }}"
+        - "{{ leckeep_minio_secret_key }}"
+        - "{{ leckeep_jwt_secret }}"
+      no_log: true
+
   tasks:
-    - name: Log into DockerHub
-      docker_login:
-        username: "{{ lookup('env', 'DOCKER_USERNAME') }}"
-        password: "{{ lookup('env', 'DOCKER_PASSWORD') }}"
-        
-    - name: Stop and remove backend container
-      docker_container:
-        name: "{{ backend_container }}"
-        state: absent
-      
-    - name: Stop and remove frontend container  
-      docker_container:
-        name: "{{ frontend_container }}"
-        state: absent
-        
-    - name: Pull latest backend image
-      docker_image:
-        name: "{{ backend_image }}"
-        source: pull
-        
-    - name: Pull latest frontend image
-      docker_image: 
-        name: "{{ frontend_image }}"
-        source: pull
-      
-    - name: Start backend container
-      docker_container:
-        name: "{{ backend_container }}"
-        image: "{{ backend_image }}" 
-        state: started
-        ports:
-          - "{{ backend_port }}:{{ backend_port }}"
-        
-    - name: Start frontend container
-      docker_container:
-        name: "{{ frontend_container }}"
-        image: "{{ frontend_image }}"
-        state: started
-        ports:
-          - "{{ frontend_port }}:80"
+    - name: Prepare Docker on the application host
+      ansible.builtin.import_tasks: tasks/prepare-host.yml
+      when: leckeep_prepare_host | bool
+
+    - name: Check the Compose plugin
+      ansible.builtin.command: docker compose version --short
+      register: leckeep_compose_version
+      changed_when: false
+      check_mode: false
+
+    - name: Require a supported Compose plugin
+      ansible.builtin.assert:
+        that:
+          - leckeep_compose_version.stdout | regex_replace('^v', '') is version('2.18.0', '>=')
+
+    - name: Create the deployment directory
+      ansible.builtin.file:
+        path: "{{ leckeep_deployment_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: Render the runtime stack from the repository Compose definition
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: "{{ leckeep_deployment_dir }}/docker-compose.yml"
+        mode: '0644'
+
+    - name: Create the private runtime environment
+      ansible.builtin.template:
+        src: runtime.env.j2
+        dest: "{{ leckeep_deployment_dir }}/.env"
+        mode: '0600'
+      no_log: true
+      diff: false
+
+    - name: Validate the rendered Compose configuration without printing secrets
+      ansible.builtin.command:
+        argv: [docker, compose, config, --quiet]
+        chdir: "{{ leckeep_deployment_dir }}"
+      changed_when: false
+      when: not ansible_check_mode
+      no_log: true
+
+    - name: Authenticate to the registry when credentials are supplied
+      community.docker.docker_login:
+        registry_url: "{{ leckeep_registry_url }}"
+        username: "{{ leckeep_registry_username }}"
+        password: "{{ leckeep_registry_password }}"
+      when:
+        - leckeep_registry_username | length > 0
+        - not ansible_check_mode
+      no_log: true
+
+    - name: Pull and reconcile the complete stack without building on EC2
+      community.docker.docker_compose_v2:
+        project_src: "{{ leckeep_deployment_dir }}"
+        state: present
+        build: never
+        pull: "{{ leckeep_pull_policy }}"
+        recreate: auto
+        remove_orphans: true
+        remove_volumes: false
+        wait: true
+        wait_timeout: "{{ leckeep_wait_timeout }}"
+      when: not ansible_check_mode
+      no_log: true
+
+    - name: Read service status
+      ansible.builtin.command:
+        argv: [docker, compose, ps, --all, --format, json]
+        chdir: "{{ leckeep_deployment_dir }}"
+      register: leckeep_status
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Verify all required services are running and healthy
+      ansible.builtin.assert:
+        that:
+          - leckeep_containers | map(attribute='Service') | sort == leckeep_images.keys() | sort
+          - leckeep_containers | rejectattr('State', 'equalto', 'running') | list | length == 0
+          - leckeep_containers | rejectattr('Health', 'equalto', 'healthy') | list | length == 0
+        fail_msg: A required LecKeep service is missing, stopped, or unhealthy. Inspect docker compose ps and logs on the host.
+      vars:
+        # Compose emits one JSON object per line (older releases may emit an array).
+        leckeep_containers: "{{ (leckeep_status.stdout | from_json) if leckeep_status.stdout.startswith('[') else (leckeep_status.stdout_lines | map('from_json') | list) }}"
+      when: not ansible_check_mode

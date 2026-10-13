@@ -1,0 +1,9 @@
+# Local Compose credentials and overrides must not be committed.
+.env
+.env.*
+!.env.example
+
+# Local deployment inventory and secret variable overrides.
+Ansible/inventory.ini
+Ansible/secrets*.yml
+Ansible/secrets*.yaml

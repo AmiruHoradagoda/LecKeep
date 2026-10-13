@@ -1,0 +1,25 @@
+---
+# Non-secret defaults. Override using --extra-vars @file.
+leckeep_deployment_dir: /opt/leckeep
+leckeep_project_name: leckeep
+leckeep_prepare_host: true
+leckeep_wait_timeout: 180
+leckeep_pull_policy: always
+leckeep_registry_url: https://index.docker.io/v1/
+leckeep_images:
+  backend: amiru1234/leckeep-backend:latest
+  frontend: amiru1234/leckeep-frontend:latest
+  mongodb: mongo:7.0
+  # Publish docker/minio/Dockerfile, then supply its registry image reference.
+  minio: "{{ lookup('ansible.builtin.env', 'DOCKER_IMAGE_MINIO') }}"
+
+# Keep loopback-only bindings; use SSH tunnels from the workstation.
+leckeep_browser_host: localhost
+leckeep_frontend_port: 3000
+leckeep_backend_port: 5050
+leckeep_minio_api_port: 19000
+leckeep_minio_console_port: 19001
+leckeep_mongodb_database: leckeep
+leckeep_minio_bucket: leckeep-documents
+leckeep_minio_region: us-east-1
+leckeep_cors_allowed_origins: "http://{{ leckeep_browser_host }}:{{ leckeep_frontend_port }},http://127.0.0.1:{{ leckeep_frontend_port }}"

@@ -1,0 +1,12 @@
+{# Reuse ports, environment wiring, healthchecks, dependencies, and volumes from Compose. #}
+{% set source = lookup('ansible.builtin.file', playbook_dir ~ '/../docker-compose.yml') | from_yaml %}
+{% set runtime = namespace(services={}) %}
+{% for name, original in source.services.items() %}
+{% set service = original | dict2items | rejectattr('key', 'in', ['build', 'pull_policy']) | items2dict %}
+{% set service = service | combine({'image': leckeep_images[name], 'pull_policy': 'always'}) %}
+{% if 'container_name' in service %}
+{% set service = service | combine({'container_name': service.container_name | regex_replace('^' ~ source.name ~ '-', leckeep_project_name ~ '-')}) %}
+{% endif %}
+{% set runtime.services = runtime.services | combine({name: service}) %}
+{% endfor %}
+{{ source | combine({'name': leckeep_project_name, 'services': runtime.services}) | to_nice_yaml(indent=2, sort_keys=false) }}
