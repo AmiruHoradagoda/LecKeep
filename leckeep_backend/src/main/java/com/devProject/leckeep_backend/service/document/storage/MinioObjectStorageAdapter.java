@@ -9,7 +9,7 @@ import io.minio.RemoveObjectArgs;
 import io.minio.StatObjectArgs;
 import io.minio.StatObjectResponse;
 import io.minio.http.Method;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -17,12 +17,18 @@ import org.springframework.stereotype.Service;
 import java.util.concurrent.TimeUnit;
 
 @Service
-@RequiredArgsConstructor
 @ConditionalOnProperty(name = "storage.provider", havingValue = "minio", matchIfMissing = true)
 public class MinioObjectStorageAdapter implements ObjectStorageService{
     private static final int PREVIEW_URL_EXPIRY_MINUTES = 15;
 
     private final MinioClient minioClient;
+    private final MinioClient minioPreviewClient;
+
+    public MinioObjectStorageAdapter(MinioClient minioClient,
+            @Qualifier("minioPreviewClient") MinioClient minioPreviewClient) {
+        this.minioClient = minioClient;
+        this.minioPreviewClient = minioPreviewClient;
+    }
 
     @Value("${minio.bucket-name}")
     private String bucketName;
@@ -94,7 +100,7 @@ public class MinioObjectStorageAdapter implements ObjectStorageService{
     @Override
     public String generatePreviewUrl(String objectKey) {
         try {
-            return minioClient.getPresignedObjectUrl(
+            return minioPreviewClient.getPresignedObjectUrl(
                     GetPresignedObjectUrlArgs.builder()
                             .method(Method.GET)
                             .bucket(bucketName)

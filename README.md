@@ -87,6 +87,8 @@ The backend reads these values from Spring configuration:
 | `MONGODB_DATABASE` | `noteApp` | MongoDB database name |
 | `JWT_SECRET` | Dev-only fallback secret | JWT signing secret |
 | `MINIO_URL` | `http://localhost:9000` | MinIO endpoint |
+| `MINIO_PUBLIC_URL` | Same as `MINIO_URL` | Browser-visible endpoint used to sign preview URLs |
+| `MINIO_REGION` | `us-east-1` | Region used by storage and URL signing |
 | `MINIO_ACCESS_KEY` | `minioadmin` | MinIO access key |
 | `MINIO_SECRET_KEY` | `minioadmin` | MinIO secret key |
 | `MINIO_BUCKET_NAME` | `leckeep-documents` | Document bucket |
@@ -103,7 +105,7 @@ VITE_API_URL=http://localhost:8081/api/v1
 
 If `VITE_API_URL` is not set, the frontend uses `/api/v1`. The Vite development server also proxies `/api` to `http://localhost:8081`.
 
-## Local Development
+## Local Development (without Docker)
 
 ### 1. Start MongoDB and MinIO
 
@@ -187,30 +189,59 @@ Preview the frontend production build:
 npm run preview
 ```
 
-## Docker
+## Docker (full local stack)
 
-The repository includes Dockerfiles for both apps and a root `docker-compose.yml` scaffold.
-
-Build images with the tags expected by `docker-compose.yml`:
+Docker Desktop (Linux containers) or Docker Engine with Docker Compose v2+ is sufficient. The backend is built from source inside Docker; a host JDK, Maven, MongoDB, and MinIO are not required.
 
 ```bash
-cd leckeep_backend
-./mvnw clean package
-docker build -t note-backend-image:v1 .
-
-cd ../leckeep_frontend
-npm install
-npm run build
-docker build -t note-frontend-image:v1 .
+git clone https://github.com/AmiruHoradagoda/LecKeep.git
+cd LecKeep
+cp .env.example .env
+docker compose up -d
 ```
 
-Then run from the repository root:
+On Windows PowerShell, use `Copy-Item .env.example .env` instead of `cp`. The example contains development-only placeholders. `.env` is gitignored; never use these credentials or the example JWT secret in production.
+
+Default local URLs:
+
+| Service | URL |
+| --- | --- |
+| Frontend | http://localhost:3000 |
+| Backend | http://localhost:5050 |
+| Swagger UI | http://localhost:5050/swagger-ui.html |
+| MinIO object API / signed previews | http://localhost:19000 |
+| MinIO console | http://localhost:19001 |
+
+Console credentials come from `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY` in your local `.env`.
+
+The stack contains frontend, backend, MongoDB, and MinIO on its own Compose network. MongoDB has no host port. Published ports bind only to `127.0.0.1`. Defaults avoid the existing Airflow port 8080 and AIStor ports 9000/9001; the stack does not reuse or stop those containers. Override host ports in `.env` if needed.
+
+Spring runs on container port 8080 via `SERVER_PORT=8080`. Its normal non-Docker default remains 8081. The backend connects to `mongodb:27017` and `minio:9000`. `MINIO_PUBLIC_URL` uses the browser-visible hostname and MinIO host port, so signed preview URLs do not expose an unresolvable Docker hostname.
+
+`BROWSER_HOST` defaults to `localhost`. Compose derives the frontend's build-time `VITE_API_URL` and the signed-preview endpoint from that hostname and the chosen host ports. CORS permits the selected frontend origin and its `127.0.0.1` equivalent. An optional `CORS_ALLOWED_ORIGINS` override must list explicit origins. Rebuild after changing browser-facing settings:
 
 ```bash
-docker compose up
+docker compose config --quiet
+docker compose build
+docker compose up -d
+docker compose ps
+docker compose logs --tail=100 backend minio mongodb
 ```
 
-Check the backend Dockerfile and compose port/profile settings before using this for production. The Spring app currently uses port `8081` in `application.yml`, while the Dockerfile and compose file are configured around container port `8080`. The compose file also does not currently define MongoDB or MinIO services.
+The backend waits for MongoDB and MinIO healthchecks; the frontend waits for the backend's existing Swagger UI endpoint. No Actuator dependency is added. Failed containers use `restart: unless-stopped`.
+
+MinIO is built from the pinned official source release `RELEASE.2025-10-15T17-29-55Z`, following its [container build guidance](https://github.com/minio/minio/releases/tag/RELEASE.2025-10-15T17-29-55Z). This avoids relying on unavailable community registry images or an AIStor license. First builds download Go/Maven/npm dependencies and can take time; subsequent builds use Docker caches.
+
+MongoDB data and uploaded objects live in the named `mongodb_data` and `minio_data` volumes. Stop and restart without deleting data:
+
+```bash
+docker compose stop
+docker compose start
+```
+
+`docker compose down` also retains the named volumes. **`docker compose down -v` deletes the local database and uploaded files.** Existing AIStor volumes are separate.
+
+This is an HTTP, loopback-only development stack. It does not configure production TLS, external access, AWS, or deployment. Jenkins retains its default backend Docker target, which copies the JAR packaged by CI; Compose selects the separate `from-source` target in the same Dockerfile.
 
 ## API Overview
 

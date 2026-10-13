@@ -1,5 +1,8 @@
 *
 !Dockerfile
+!pom.xml
+!src/
+!src/**
 !target/
 target/*
-!target/leckeep_backend-0.0.1-SNAPSHOT.jar
+!target/*.jar
