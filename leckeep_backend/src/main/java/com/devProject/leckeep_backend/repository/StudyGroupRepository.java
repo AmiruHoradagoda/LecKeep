@@ -8,12 +8,15 @@ import org.springframework.stereotype.Repository;
 import com.devProject.leckeep_backend.model.StudyGroup;
 
 import java.util.List;
+import java.util.Collection;
 
 @Repository
 public interface StudyGroupRepository extends MongoRepository<StudyGroup, String> {
     List<StudyGroup> findByOwnerId(String ownerId);
 
     Page<StudyGroup> findByOwnerId(String ownerId, Pageable pageable);
+
+    Page<StudyGroup> findByOwnerIdOrIdIn(String ownerId, Collection<String> ids, Pageable pageable);
 
     List<StudyGroup> findByNameContainingIgnoreCase(String name);
 }

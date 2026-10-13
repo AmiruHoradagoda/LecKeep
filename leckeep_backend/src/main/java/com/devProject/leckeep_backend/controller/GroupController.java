@@ -30,9 +30,14 @@ public class GroupController {
     @GetMapping
     public StandardResponseDto getGroups(
             @RequestParam(required = false, defaultValue = "0") int page,
-            @RequestParam(required = false, defaultValue = "10") int size
+            @RequestParam(required = false, defaultValue = "10") int size,
+            @RequestParam(required = false, defaultValue = "owned") String scope
     ) {
-        StudyGroupPaginateResponseDto groups = groupService.getGroups(page, size);
+        StudyGroupPaginateResponseDto groups = switch (scope) {
+            case "owned" -> groupService.getGroups(page, size);
+            case "shareable" -> groupService.getShareableGroups(page, size);
+            default -> throw new IllegalArgumentException("Unsupported group scope. Use owned or shareable");
+        };
         return new StandardResponseDto(200, "Groups fetched", groups);
     }
 

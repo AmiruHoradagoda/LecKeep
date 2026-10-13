@@ -6,6 +6,7 @@ import com.devProject.leckeep_backend.mappers.NoteFolderMapper;
 import com.devProject.leckeep_backend.model.NoteFolder;
 import com.devProject.leckeep_backend.repository.*;
 import com.devProject.leckeep_backend.service.auth.CurrentUserService;
+import com.devProject.leckeep_backend.service.group.GroupAccessService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.domain.PageImpl;
@@ -25,7 +26,8 @@ class FolderReadAuthorizationTests {
     private final StudyGroupRepository groups = mock(StudyGroupRepository.class);
     private final FolderPermissionService permissions = new FolderPermissionService(users, members,
             mock(FolderShareRepository.class), groups);
-    private final FolderServiceImpl service = new FolderServiceImpl(folders, new NoteFolderMapper(), users, permissions);
+    private final FolderServiceImpl service = new FolderServiceImpl(folders, new NoteFolderMapper(), users, permissions,
+            new GroupAccessService(groups, members, users));
     private NoteFolder denied;
     private NoteFolder allowed;
 

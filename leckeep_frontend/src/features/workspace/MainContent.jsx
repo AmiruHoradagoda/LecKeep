@@ -34,7 +34,8 @@ import { addGroupMember, createGroup, getGroups } from "../groups/groups.api";
 import GroupsView from "../groups/GroupsView";
 import { createSubject, deleteSubject, getSubjects } from "../subjects/subjects.api";
 import SubjectsView from "../subjects/SubjectsView";
-import { createFolder, deleteFolder, getFolder, getFolders, updateFolder } from "../folders/folders.api";
+import { createFolder, deleteFolder, getFolder, getFolders } from "../folders/folders.api";
+import ShareFolderDialog from "../folders/ShareFolderDialog";
 import FoldersView from "../folders/FoldersView";
 import DocumentPreviewDialog from "../documents/DocumentPreviewDialog";
 import { getDocumentDownloadUrl, getFolderDocuments, previewDocument, uploadDocument } from "../documents/documents.api";
@@ -53,7 +54,7 @@ import {
 const noteScopes = [
   { id: "global", label: "Global", description: "Notes published for everyone", Icon: Globe2 },
   { id: "private", label: "Private", description: "Only visible to you", Icon: LockKeyhole },
-  { id: "shared", label: "Shared", description: "Notes you shared", Icon: Share2 },
+  { id: "shared", label: "Published", description: "Folders you published through visibility", Icon: Share2 },
   { id: "group", label: "Group", description: "Notes shared inside groups", Icon: Users },
 ];
 const getDocumentName = (document) =>
@@ -195,8 +196,6 @@ const MainContent = ({ activeSection = "subjects", searchResults, searchQuery = 
   const [documentPreviewLoading, setDocumentPreviewLoading] = useState(false);
   const [documentPreviewError, setDocumentPreviewError] = useState("");
   const [shareNote, setShareNote] = useState(null);
-  const [shareTarget, setShareTarget] = useState("global");
-  const [shareGroupId, setShareGroupId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [newSubjectName, setNewSubjectName] = useState("");
@@ -221,7 +220,7 @@ const MainContent = ({ activeSection = "subjects", searchResults, searchQuery = 
     try {
       const [subjectList, groupPage, userList] = await Promise.all([
         getSubjects(),
-        getGroups({ size: 100 }),
+        getGroups({ size: 100, scope: "shareable" }),
         getUsers().catch(() => []),
       ]);
 
@@ -716,57 +715,7 @@ const MainContent = ({ activeSection = "subjects", searchResults, searchQuery = 
     }
   };
 
-  const openShareDialog = (note) => {
-    setShareNote(note);
-    setShareTarget("global");
-    setShareGroupId(groups[0]?.id || "");
-  };
-
-  const handleShareNote = async () => {
-    if (!shareNote) return;
-    if (shareTarget === "group" && !shareGroupId) {
-      setError("Please select a group to share this note.");
-      return;
-    }
-
-    try {
-      const nextVisibility = shareTarget === "global" ? "global" : "group";
-      const updatedFolder = await updateFolder(shareNote.id, {
-        title: shareNote.title,
-        description: shareNote.content || "",
-        subjectId: shareNote.subjectId,
-        semester: shareNote.semester,
-        category: shareNote.category,
-        visibility: nextVisibility,
-        groupId: nextVisibility === "group" ? shareGroupId : "",
-      });
-
-      saveNoteMeta({
-        ...noteMeta,
-        [shareNote.id]: {
-        ...(noteMeta[shareNote.id] || {}),
-        subject: shareNote.subject,
-        subjectId: shareNote.subjectId,
-        semester: updatedFolder.semester || shareNote.semester,
-        category: toFolderCategoryLabel(updatedFolder.category),
-        categoryValue: updatedFolder.category,
-        attachmentName: shareNote.attachmentName,
-        documents: shareNote.documents,
-        visibility: nextVisibility,
-        groupId: nextVisibility === "group" ? shareGroupId : "",
-        author: shareNote.author || currentAuthorName(),
-        sharedByMe: true,
-        sharedTo: shareTarget,
-        },
-      });
-      setActiveNoteScope("shared");
-      setSelectedNote(null);
-      setShareNote(null);
-      setError("");
-    } catch (err) {
-      setError(err.message || "Failed to share folder");
-    }
-  };
+  const openShareDialog = (note) => setShareNote(note);
 
   const PageHeader = ({ title, description, action }) => (
     <div className="mb-9 flex flex-wrap items-start justify-between gap-4">
@@ -1153,7 +1102,7 @@ const MainContent = ({ activeSection = "subjects", searchResults, searchQuery = 
           <Button type="button" variant="outline" size="sm" onClick={() => setSelectedNote(note)}>
             <Eye size={14} /> View Folder
           </Button>
-          {note.visibility === "private" && (
+          {note.userId === getUserId() && (
             <Button type="button" variant="outline" size="sm" onClick={() => openShareDialog(note)}>
               <Share2 size={14} /> Share
             </Button>
@@ -1180,63 +1129,9 @@ const MainContent = ({ activeSection = "subjects", searchResults, searchQuery = 
     </button>
   );
 
-  const renderShareDialog = () => {
-    if (!shareNote) return null;
-
-    return (
-      <div className="fixed inset-0 z-50 grid place-items-center bg-slate-900/35 p-4 backdrop-blur-md">
-        <Card className="w-full max-w-lg bg-white p-6 shadow-2xl">
-          <div className="mb-5 flex items-start justify-between gap-4">
-            <div>
-              <h2 className="text-xl font-extrabold">Share Note Folder</h2>
-              <p className="mt-2 text-sm text-muted-foreground">{shareNote.title}</p>
-            </div>
-            <Button type="button" variant="ghost" size="icon" onClick={() => setShareNote(null)}>
-              <X size={18} />
-            </Button>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className={`cursor-pointer rounded-xl border p-4 ${shareTarget === "global" ? "border-primary bg-secondary" : "border-border bg-muted/40"}`}>
-              <input type="radio" name="shareTarget" value="global" checked={shareTarget === "global"} onChange={() => setShareTarget("global")} className="sr-only" />
-              <div className="flex items-center gap-3">
-                <Globe2 className="text-primary" size={20} />
-                <span className="font-extrabold">Share to Global</span>
-              </div>
-              <p className="mt-2 text-xs leading-5 text-muted-foreground">Everyone can see this folder.</p>
-            </label>
-
-            <label className={`cursor-pointer rounded-xl border p-4 ${shareTarget === "group" ? "border-primary bg-secondary" : "border-border bg-muted/40"}`}>
-              <input type="radio" name="shareTarget" value="group" checked={shareTarget === "group"} onChange={() => setShareTarget("group")} className="sr-only" />
-              <div className="flex items-center gap-3">
-                <Users className="text-primary" size={20} />
-                <span className="font-extrabold">Share to Group</span>
-              </div>
-              <p className="mt-2 text-xs leading-5 text-muted-foreground">Only selected group members can see it.</p>
-            </label>
-          </div>
-
-          {shareTarget === "group" && (
-            <label className="mt-5 block space-y-2">
-              <span className="text-sm font-bold">Select group</span>
-              <select
-                value={shareGroupId}
-                onChange={(event) => setShareGroupId(event.target.value)}
-                className="h-10 w-full rounded-lg border border-input bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-              >
-                {groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
-              </select>
-            </label>
-          )}
-
-          <div className="mt-6 flex justify-end gap-3">
-            <Button type="button" variant="outline" onClick={() => setShareNote(null)}>Cancel</Button>
-            <Button type="button" onClick={handleShareNote}>Share Folder</Button>
-          </div>
-        </Card>
-      </div>
-    );
-  };
+  const renderShareDialog = () => shareNote ? (
+    <ShareFolderDialog key={shareNote.id} folder={shareNote} onClose={() => setShareNote(null)} />
+  ) : null;
 
   const renderFolderView = (note) => {
     const resources = getFolderResources(note);
@@ -1276,7 +1171,7 @@ const MainContent = ({ activeSection = "subjects", searchResults, searchQuery = 
                 )}
               </div>
             </div>
-            {note.visibility === "private" && (
+            {note.userId === getUserId() && (
               <Button type="button" variant="outline" onClick={() => openShareDialog(note)}>
                 <Share2 size={16} /> Share
               </Button>

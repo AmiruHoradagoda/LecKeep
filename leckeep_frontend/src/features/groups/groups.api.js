@@ -2,8 +2,8 @@ import { apiFetch } from "../../lib/apiClient";
 
 const unwrap = (response) => response?.data ?? response;
 
-export const getGroups = async ({ page = 0, size = 100 } = {}) =>
-  unwrap(await apiFetch("/groups", { params: { page, size } }));
+export const getGroups = async ({ page = 0, size = 100, scope = "owned" } = {}) =>
+  unwrap(await apiFetch("/groups", { params: { page, size, scope } }));
 
 export const createGroup = async (payload) =>
   unwrap(await apiFetch("/groups", {

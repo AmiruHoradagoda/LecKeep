@@ -9,6 +9,8 @@ import com.devProject.leckeep_backend.dto.response.pagination.StudyGroupPaginate
 public interface GroupService {
     StudyGroupPaginateResponseDto getGroups(int page, int size);
 
+    StudyGroupPaginateResponseDto getShareableGroups(int page, int size);
+
     StudyGroupResponseDto createGroup(StudyGroupRequestDto request);
 
     StudyGroupResponseDto getGroupById(String id);

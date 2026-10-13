@@ -25,6 +25,8 @@ public class FolderShare {
     private String ownerId;
     private ShareTargetType targetType;
     private String targetId;
+    @Builder.Default
     private SharePermission permission = SharePermission.READ;
+    @Builder.Default
     private LocalDateTime createdAt = LocalDateTime.now();
 }

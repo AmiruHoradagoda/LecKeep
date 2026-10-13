@@ -22,6 +22,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import java.util.List;
 
 @Service
 @RequiredArgsConstructor
@@ -55,6 +56,21 @@ public class GroupServiceImpl implements GroupService {
                         .toList())
                 .dataCount(groupPage.getTotalElements())
                 .build();
+    }
+
+    @Override
+    public StudyGroupPaginateResponseDto getShareableGroups(int page, int size) {
+        String userId = currentUserService.requireCurrentUserId();
+        List<String> adminGroupIds = groupMemberRepository.findByUserId(userId).stream()
+                .filter(member -> member.getRole() == GroupRole.ADMIN)
+                .map(GroupMember::getGroupId)
+                .filter(id -> id != null && !id.isBlank()).distinct().toList();
+        Pageable pageable = PaginationUtils.buildPageable(page, size, MAX_PAGE_SIZE,
+                Sort.by(Sort.Direction.DESC, "updatedAt", "createdAt"));
+        Page<StudyGroup> groupPage = studyGroupRepository.findByOwnerIdOrIdIn(userId, adminGroupIds, pageable);
+        return StudyGroupPaginateResponseDto.builder()
+                .dataList(groupPage.getContent().stream().map(studyGroupMapper::toStudyGroupResponseDto).toList())
+                .dataCount(groupPage.getTotalElements()).build();
     }
 
     @Override

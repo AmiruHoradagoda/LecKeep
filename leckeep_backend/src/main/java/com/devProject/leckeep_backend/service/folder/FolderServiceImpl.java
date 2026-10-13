@@ -16,6 +16,7 @@ import com.devProject.leckeep_backend.mappers.NoteFolderMapper;
 import com.devProject.leckeep_backend.model.NoteFolder;
 import com.devProject.leckeep_backend.repository.NoteFolderRepository;
 import com.devProject.leckeep_backend.service.auth.CurrentUserService;
+import com.devProject.leckeep_backend.service.group.GroupAccessService;
 import com.devProject.leckeep_backend.utils.PaginationUtils;
 
 import java.util.List;
@@ -29,6 +30,7 @@ public class FolderServiceImpl implements FolderService {
     private final NoteFolderMapper noteFolderMapper;
     private final CurrentUserService currentUserService;
     private final FolderPermissionService folderPermissionService;
+    private final GroupAccessService groupAccessService;
 
     @Override
     public NoteFolderPaginateResponseDto getFolders(String scope, int page, int size) {
@@ -85,10 +87,9 @@ public class FolderServiceImpl implements FolderService {
 
     @Override
     public NoteFolderResponseDto updateFolder(String id, NoteFolderRequestDto request) {
-        validateFolderRequest(request);
-
         NoteFolder noteFolder = findFolderOrThrow(id);
         requireFolderOwner(noteFolder);
+        validateFolderRequest(request);
         noteFolderMapper.updateNoteFolder(noteFolder, request);
 
         NoteFolder updatedFolder = noteFolderRepository.save(noteFolder);
@@ -121,9 +122,8 @@ public class FolderServiceImpl implements FolderService {
         if (request.getTitle() == null || request.getTitle().isBlank()) {
             throw new IllegalArgumentException("Folder title is required");
         }
-        if (request.getVisibility() == FolderVisibility.GROUP
-                && (request.getGroupId() == null || request.getGroupId().isBlank())) {
-            throw new IllegalArgumentException("Group id is required for group folders");
+        if (request.getVisibility() == FolderVisibility.GROUP) {
+            request.setGroupId(groupAccessService.requireSharingAccess(request.getGroupId()).getId());
         }
     }
 
