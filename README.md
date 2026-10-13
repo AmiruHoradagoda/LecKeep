@@ -326,9 +326,24 @@ Most backend endpoints return:
 
 Auth endpoints return an `AuthenticationResponse` directly.
 
+## Jenkins CI
+
+The Jenkinsfile runs Checkout, Backend Tests, Backend Build, Frontend Install, Frontend Build, Docker Build, and Docker Push, in that order. It stops after pushing images to Docker Hub; it does not deploy to EC2.
+
+- Configure a Pipeline from SCM or a Multibranch Pipeline for this LecKeep repository, using `Jenkinsfile`. Checkout uses the job's SCM configuration and credentials.
+- Provide a Linux agent with both `linux` and `docker` labels, a JDK 17 or newer, a POSIX shell, and access to a working Docker daemon. Maven is supplied by the wrapper; no Jenkins Maven installation is required.
+- Install the Pipeline, Git, Credentials Binding, JUnit, and NodeJS plugins. Configure the existing NodeJS tool name `node-22.12.0` with Node.js 22.12.0 or newer compatible version.
+- Provide the username/password credential `dockerhub-credentials`. Use the Docker Hub username and an access token with push permission for `amiru1234/leckeep-backend` and `amiru1234/leckeep-frontend`. Change the image namespace in `Jenkinsfile` if needed.
+- Set the public `VITE_API_URL` build parameter for the intended environment. It defaults to `/api/v1` and is applied to both the standalone frontend build and Docker build. This value is embedded in browser assets; it must not contain credentials. A relative URL requires routing `/api` to the backend when deployment is configured later.
+- Backend tests mock MongoDB and object storage and require no production database, JWT, MinIO, or SSH credentials. Tests run once with `sh ./mvnw -B clean test`; packaging uses `sh ./mvnw -B package -DskipTests` after that stage succeeds. Jenkins publishes the JUnit reports.
+- Frontend dependencies come from `npm ci` and `package-lock.json`. Docker builds use the current app directories and publish `amiru1234/leckeep-backend:latest` and `amiru1234/leckeep-frontend:latest`.
+- Docker Hub credentials are bound only during push, tracing is disabled for login, and authentication uses password stdin. Logout and removal of the temporary Docker config run even when a push fails. A test, build, or push failure fails the pipeline.
+
+Validate the Jenkinsfile with the target Jenkins controller's Declarative Pipeline linter and run the job once to verify its agent, plugins, SCM access, and registry permissions. Local builds alone cannot verify Docker Hub push access.
+
 ## Deployment Notes
 
-- `Jenkinsfile` builds backend and frontend images, pushes them to Docker Hub, and deploys with Ansible.
+- Jenkins currently stops at Docker Hub image publication; EC2 deployment is not part of this CI pipeline.
 - `ansible/playbook.yml` pulls and restarts Docker containers on an EC2 host.
 - `terraform/main.tf` attaches a security group to an existing EC2 instance.
 - `leckeep_frontend/.env.production` points the production frontend to `https://app.amiru-web.xyz/api/v1`.

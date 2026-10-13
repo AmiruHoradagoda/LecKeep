@@ -1,138 +1,112 @@
 pipeline {
-    agent any
-    environment{
-        // Docker-related environment variables
-        DOCKER_IMAGE_BACKEND = "amiru1234/note-app-backend:latest"
-        DOCKER_IMAGE_FRONTEND = "amiru1234/note-app-frontend:latest"
-        DOCKER_CREDENTIALS_ID = "dockerhub-credentials"
+    agent { label 'linux && docker' }
 
-        // Container names for deployment
-        DOCKER_CONTAINER_BACKEND = 'noteapp-backend'
-        DOCKER_CONTAINER_FRONTEND = 'noteapp-frontend'
-
-        // SSH deployment variables
-        SSH_CREDENTIALS_ID = "notekeep-prod-server"
-        SSH_TARGET = "ubuntu@100.25.81.92"
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
     }
 
     tools {
-        maven 'mvn-3.9.8'
         nodejs 'node-22.12.0'
     }
-    
+
+    parameters {
+        string(name: 'VITE_API_URL', defaultValue: '/api/v1', description: 'Public API URL embedded in the frontend build; never put secrets here.')
+    }
+
+    environment {
+        DOCKER_IMAGE_BACKEND = 'amiru1234/leckeep-backend:latest'
+        DOCKER_IMAGE_FRONTEND = 'amiru1234/leckeep-frontend:latest'
+        DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
+        VITE_API_URL = "${params.VITE_API_URL}"
+    }
+
     stages {
         stage('Checkout') {
             steps {
-                git branch: 'main', url: 'https://github.com/AmiruHoradagoda/Note-taking-app.git', credentialsId: 'amiruweb-jenkins-access-token'
+                checkout scm
             }
         }
-        
-        stage('Build Backend') {
-            steps {
-                dir('backend/NoteApp') {  
-                    script {
-                        withCredentials([usernamePassword(credentialsId: 'notekeep-prod-database-credentials', usernameVariable: 'MONGODB_USERNAME', passwordVariable: 'MONGODB_PASSWORD')]) {
-                            sh '''#!/bin/bash
-                            echo "Building backend with Mongodb database"
-                            echo "MongoDB Username: $MONGODB_USERNAME"
-                            echo "MongoDB Password: $MONGODB_PASSWORD"
-                            export MONGODB_USERNAME=$MONGODB_USERNAME
-                            export MONGODB_PASSWORD=$MONGODB_PASSWORD
-                            mvn clean package
-                            '''
-                        }
-                    }
-                }
-            }
-        }
-        
+
         stage('Backend Tests') {
             steps {
-                dir('backend/NoteApp') {
-                    sh 'mvn test'
+                dir('leckeep_backend') {
+                    // Invoke through sh because the checked-in wrapper is not executable.
+                    sh 'sh ./mvnw -B clean test'
+                }
+            }
+            post {
+                always {
+                    junit 'leckeep_backend/target/surefire-reports/TEST-*.xml'
                 }
             }
         }
-        
-        stage('Build Frontend') {
+
+        stage('Backend Build') {
             steps {
-                dir('frontend/note-app') {  
-                    echo "Building frontend"
-                    sh 'npm install --save-dev @babel/plugin-proposal-private-property-in-object'
-                    sh 'npm install react-select' 
-                    sh 'npm install'
-                    sh 'REACT_APP_API_URL=https://app.amiru-web.xyz/api/v1 CI=false npm run build'
+                dir('leckeep_backend') {
+                    // Tests already passed in the preceding stage.
+                    sh 'sh ./mvnw -B package -DskipTests'
                 }
             }
         }
-        
-        stage('Docker Build and Push') {
+
+        stage('Frontend Install') {
             steps {
-                dir('backend/NoteApp') {
-                    script {
-                        withCredentials([usernamePassword(credentialsId: "${DOCKER_CREDENTIALS_ID}", usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
-                            sh '''
-                                docker build -t ${DOCKER_IMAGE_BACKEND} .
-                                echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USERNAME}" --password-stdin
-                                docker push ${DOCKER_IMAGE_BACKEND}
-                            '''
-                        }
-                    }
-                }
-                dir('frontend/note-app') {
-                    script {
-                        withCredentials([usernamePassword(credentialsId: "${DOCKER_CREDENTIALS_ID}", usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
-                            sh '''
-                                docker build -t ${DOCKER_IMAGE_FRONTEND} .
-                                echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USERNAME}" --password-stdin
-                                docker push ${DOCKER_IMAGE_FRONTEND}
-                            '''
-                        }
-                    }
+                dir('leckeep_frontend') {
+                    sh 'npm ci'
                 }
             }
         }
-        
-        stage('Ansible Deploy') {
+
+        stage('Frontend Build') {
+            steps {
+                dir('leckeep_frontend') {
+                    sh 'npm run build'
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    set -eu
+                    docker build --tag "$DOCKER_IMAGE_BACKEND" leckeep_backend
+                    docker build --build-arg VITE_API_URL="$VITE_API_URL" --tag "$DOCKER_IMAGE_FRONTEND" leckeep_frontend
+                '''
+            }
+        }
+
+        stage('Docker Push') {
             steps {
                 script {
-                    withCredentials([
-                        usernamePassword(credentialsId: "${DOCKER_CREDENTIALS_ID}", 
-                                    usernameVariable: 'DOCKER_USERNAME', 
-                                    passwordVariable: 'DOCKER_PASSWORD'),
-                        sshUserPrivateKey(credentialsId: "${SSH_CREDENTIALS_ID}", 
-                                    keyFileVariable: 'SSH_KEY')
-                    ]){
-                        sh '''
-                            # Use the correct path to the Ansible files
-                            cd Ansible
-                            
-                            # Create a temporary inventory file with correct values
-                            echo "[ec2]" > temp_inventory.ini
-                            echo "dev-server ansible_host=ec2-100-25-81-92.compute-1.amazonaws.com" >> temp_inventory.ini
-                            echo "" >> temp_inventory.ini
-                            echo "[ec2:vars]" >> temp_inventory.ini
-                            echo "ansible_user=ubuntu" >> temp_inventory.ini
-                            echo "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> temp_inventory.ini
-                            
-                            # Run ansible-playbook with the temporary inventory
-                            ansible-playbook -i temp_inventory.ini --private-key $SSH_KEY playbook.yml
-                            
-                            # Clean up
-                            rm temp_inventory.ini
-                        '''
+                    def dockerConfigDir = "${pwd(tmp: true)}/docker-config"
+                    withEnv(["DOCKER_CONFIG=${dockerConfigDir}"]) {
+                        try {
+                            withCredentials([usernamePassword(credentialsId: env.DOCKER_CREDENTIALS_ID,
+                                    usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                                // Shell expansion keeps credentials out of Groovy strings and tracing.
+                                sh '''
+                                    set +x
+                                    set -eu
+                                    mkdir -p "$DOCKER_CONFIG"
+                                    printf '%s' "$DOCKER_PASSWORD" | docker login --username "$DOCKER_USERNAME" --password-stdin
+                                    docker push "$DOCKER_IMAGE_BACKEND"
+                                    docker push "$DOCKER_IMAGE_FRONTEND"
+                                '''
+                            }
+                        } finally {
+                            try {
+                                sh 'docker logout'
+                            } finally {
+                                dir(dockerConfigDir) {
+                                    deleteDir()
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
-    }
-    
-    post {
-        success {
-            echo 'Pipeline executed successfully!'
-        }
-        failure {
-            echo 'Pipeline execution failed!'
         }
     }
 }
